@@ -1,5 +1,13 @@
 # -*- coding: utf-8 -*-
 """Flask 主程序。"""
+import os
+
+# 预导入 akshare（预热，减少首次请求延迟）
+try:
+    import akshare as _ak
+except Exception:
+    pass
+
 from flask import Flask, render_template, request, jsonify
 
 from data_fetcher import fetch_all_data
@@ -32,8 +40,6 @@ def scan():
     except Exception as e:
         return jsonify({"code": 500, "msg": f"服务器异常: {str(e)}"})
 
-
-import os
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
