@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>个股排雷扫描仪</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+  <!-- ==================== 输入页 ==================== -->
+  <div id="page-input">
+    <nav class="navbar">
+      <span class="nav-brand">⚡ 排雷扫描仪</span>
+    </nav>
+
+    <main class="container input-main">
+      <h1 class="main-title">⚡ 个股排雷扫描仪</h1>
+      <p class="sub-title">输入股票代码或中文名称，12项核心指标精准扫描个股暴雷风险——所有数据均来自公开财报，无数据即标注缺失，绝不造假。</p>
+
+      <div class="search-bar">
+        <input id="search-input" type="text" placeholder="输入股票代码或中文名称，如 600519 / 贵州茅台" autocomplete="off">
+        <button id="search-btn">开始扫描</button>
+      </div>
+      <p id="error-msg" class="error-msg"></p>
+
+      <section class="examples">
+        <h2 class="examples-title">📊 排雷示例（点击试试）</h2>
+        <div class="example-cards">
+          <div class="example-card" data-code="600519">
+            <div class="ex-name">贵州茅台</div>
+            <div class="ex-code">600519</div>
+          </div>
+          <div class="example-card" data-code="300750">
+            <div class="ex-name">宁德时代</div>
+            <div class="ex-code">300750</div>
+          </div>
+          <div class="example-card" data-code="000671">
+            <div class="ex-name">ST阳光城</div>
+            <div class="ex-code">000671</div>
+          </div>
+        </div>
+      </section>
+
+      <footer class="disclaimer">
+        ⚠️ 本工具数据来源于公开接口，仅供参考，不构成投资建议。股市有风险，投资需谨慎。
+      </footer>
+    </main>
+  </div>
+
+  <!-- ==================== 报告页 ==================== -->
+  <div id="page-report" class="hidden">
+    <nav class="navbar report-nav">
+      <span id="back-btn" class="back-btn">← 返回</span>
+      <span id="report-stock-title" class="report-stock-title"></span>
+    </nav>
+
+    <main class="container">
+      <section class="rating-card">
+        <div id="rating-stars" class="rating-stars"></div>
+        <div id="rating-desc" class="rating-desc"></div>
+        <div class="rating-meta">
+          <span id="rating-mines"></span>
+          <span class="meta-sep">·</span>
+          <span id="rating-date"></span>
+        </div>
+      </section>
+
+      <section id="dimensions-wrap"></section>
+    </main>
+  </div>
+
+  <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>
