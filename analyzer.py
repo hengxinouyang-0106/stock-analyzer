@@ -163,6 +163,10 @@ def calc_gross_margin_gap(value, **ctx):
 
 def calc_pe_value(value, **ctx):
     """当前 PE-TTM（绝对值评估）。"""
+    # 优先看 EPS：如果近12月 EPS 亏损或微利，直接判5 颗雷，PE 无意义
+    eps = ctx.get('eps_ttm')
+    if eps is not None and eps <= 0:
+        return 5, f"近12月EPS约{eps:.2f}元，公司亏损或微利，PE失去基本面支撑。"
     if value is None:
         return MISSING
     if value < 0:
@@ -301,6 +305,7 @@ def run_analysis(d):
 
     pe_ttm = d.get('pe_ttm')
     pb_ttm = d.get('pb_ttm')
+    eps_ttm = d.get('eps_value')
 
     peg = (pe_ttm / profit_growth
            if pe_ttm is not None and profit_growth is not None and profit_growth > 0 else None)
@@ -343,7 +348,7 @@ def run_analysis(d):
         {
             "name": "估值安全边际",
             "indicators": [
-                item("当前 PE-TTM", pe_ttm, 'x', calc_pe_value, '财报'),
+                item("当前 PE-TTM", pe_ttm, 'x', calc_pe_value, '财报', eps_ttm=eps_ttm),
                 item("PEG", peg, 'num', calc_peg, '财报', profit_growth=profit_growth),
                 item("当前 PB", pb_ttm, 'x', calc_pb_value, '财报'),
             ],

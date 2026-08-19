@@ -36,15 +36,29 @@ def _safe_float(val):
         return None
 
 
+def _normalize_for_match(s):
+    """标准化字符串用于模糊匹配：去空格、全角转半角、剥离单位后缀。"""
+    s = str(s).lower()
+    s = s.replace(' ', '').replace('\u3000', '')
+    s = s.replace('（', '(').replace('）', ')')
+    s = s.replace('(元)', '').replace('（元）', '')
+    s = s.replace('(%)', '').replace('（%）', '')
+    s = s.replace('(倍)', '').replace('（倍）', '')
+    s = s.replace('(次)', '').replace('（次）', '')
+    return s
+
+
 def _find_col(df, *keywords):
-    """按关键字（不区分大小写、子串匹配）查找列名。"""
+    """按关键字（不区分大小写、子串匹配、剥离单位后缀）查找列名。"""
     if df is None or df.empty:
         return None
     for col in df.columns:
-        col_norm = str(col).lower().replace(' ', '').replace('（', '(').replace('）', ')')
+        col_norm = _normalize_for_match(col)
+        if not col_norm:
+            continue
         for kw in keywords:
-            kw_norm = kw.lower().replace(' ', '').replace('（', '(').replace('）', ')')
-            if kw_norm in col_norm:
+            kw_norm = _normalize_for_match(kw)
+            if kw_norm and kw_norm in col_norm:
                 return col
     return None
 
@@ -215,6 +229,55 @@ def _fetch_spot_sina(code):
         return None
 
 
+# ------------------------------------------------------------------ 腾讯估值接口（最稳）
+
+def _fetch_qq_quote(code):
+    """腾讯 qt.gtimg 免费行情接口，含 PE/PB/换手率/市值。
+    URL:  http://qt.gtimg.cn/q=sh600519
+    返回: v_sh600519="1~name~code~price~...~pe~...~pb~...";
+    字段索引（2026-08 实测）：
+      [1]=名称  [3]=当前价  [38]=换手率%  [39]=PE(动)
+      [45]=总市值(亿)  [46]=PB
+    """
+    import requests
+    prefix = 'sh' if code.startswith('6') else 'sz'
+    full = f'{prefix}{code}'
+    try:
+        resp = requests.get(
+            f'http://qt.gtimg.cn/q={full}',
+            timeout=8,
+            headers={'User-Agent': 'Mozilla/5.0'},
+        )
+        if resp.status_code != 200:
+            return None
+        text = resp.text.strip()
+        if '~' not in text or '"' not in text:
+            return None
+        start = text.index('"') + 1
+        end = text.rindex('"')
+        body = text[start:end]
+        parts = body.split('~')
+        # 至少需要 47 个字段（PB 在 46 索引）
+        if len(parts) < 47:
+            return None
+        result = {}
+        if len(parts) > 1 and parts[1]:
+            result['name'] = parts[1]
+        if len(parts) > 3 and parts[3]:
+            result['price'] = _safe_float(parts[3])
+        if len(parts) > 38 and parts[38]:
+            result['turnover'] = _safe_float(parts[38])
+        if len(parts) > 39 and parts[39]:
+            result['pe'] = _safe_float(parts[39])
+        if len(parts) > 45 and parts[45]:
+            result['total_mv'] = _safe_float(parts[45])
+        if len(parts) > 46 and parts[46]:
+            result['pb'] = _safe_float(parts[46])
+        return result if result else None
+    except Exception:
+        return None
+
+
 # ------------------------------------------------------------------ 主函数
 
 @cache_result(expire_seconds=3600)
@@ -243,6 +306,23 @@ def fetch_all_data(query):
         d['pe_dynamic'] = _safe_float(spot_row.get('市盈率-动态'))
         d['pb_spot'] = _safe_float(spot_row.get('市净率'))
         d['total_mv'] = _safe_float(spot_row.get('总市值'))
+
+    # ==================== 1b. 腾讯 qt.gtimg 估值接口（最稳的主来源）====================
+    # 腾讯免费接口不依赖 akshare，也不依赖东财服务器，全球 CDN 加速
+    qq_data = _fetch_qq_quote(code)
+    if qq_data is not None:
+        if qq_data.get('price') is not None:
+            d['latest_price'] = qq_data['price']
+        if qq_data.get('turnover') is not None:
+            d['turnover'] = qq_data['turnover']
+        if qq_data.get('total_mv') is not None:
+            d['total_mv'] = qq_data['total_mv']
+        if qq_data.get('pe') is not None and qq_data['pe'] > 0:
+            d['pe_ttm'] = qq_data['pe']
+            d['pe_source_note'] = '腾讯 qt.gtimg'
+        if qq_data.get('pb') is not None and qq_data['pb'] > 0:
+            d['pb_ttm'] = qq_data['pb']
+            d['pb_source_note'] = '腾讯 qt.gtimg'
 
     # ==================== 2. 季报财务指标（主）====================
     latest, prev, fin_df = _fetch_financial(code)
@@ -323,12 +403,17 @@ def fetch_all_data(query):
     price_for_calc = d.get('latest_price')
     if price_for_calc is not None and price_for_calc > 0:
         # 优先用业绩报表的 EPS（更准确），其次用主接口财务数据
-        if yjbb_eps is not None and yjbb_eps > 0:
+        # 字段名兜底：兼容 akshare 多个版本的列名（基本/摊薄/加权/稀释/EPS）
+        if yjbb_eps is not None:
             # yjbb 的 EPS 是单季度，粗略估算全年 = Q1 × 4
             eps = yjbb_eps * 4
             pe_note = '估算(最新价/业绩报表EPS×4)'
         elif latest is not None and fin_df is not None:
-            eps = _get_value(latest, fin_df, '摊薄每股收益', '加权每股收益', '每股收益', '基本每股收益')
+            eps = _get_value(
+                latest, fin_df,
+                '基本每股收益', '摊薄每股收益', '加权每股收益',
+                '稀释每股收益', '每股收益', 'eps', 'EPS',
+            )
             pe_note = '估算(最新价/财报每股收益)'
         else:
             eps = None
@@ -336,11 +421,24 @@ def fetch_all_data(query):
 
         navps = None
         if latest is not None and fin_df is not None:
-            navps = _get_value(latest, fin_df, '每股净资产', '每股净资产_调整前', '每股净资产_调整后')
+            navps = _get_value(
+                latest, fin_df,
+                '每股净资产', '每股净资产_调整前', '每股净资产_调整后',
+                '归属母公司股东权益每股', '每股股东权益',
+            )
 
-        if d.get('pe_ttm') is None and eps is not None and eps > 0:
-            d['pe_ttm'] = price_for_calc / eps
-            d['pe_source_note'] = pe_note
+        # 保存 EPS 给 analyzer 用（用于 PE 评分的亏损判断）
+        if eps is not None:
+            d['eps_value'] = eps
+
+        if d.get('pe_ttm') is None and eps is not None:
+            if eps > 0:
+                d['pe_ttm'] = price_for_calc / eps
+                d['pe_source_note'] = pe_note
+            else:
+                # 公司亏损或微利，PE 失去基本面意义，不计算
+                d['eps_loss_flag'] = True
+
         if d.get('pb_ttm') is None and navps is not None and navps > 0:
             d['pb_ttm'] = price_for_calc / navps
             d['pb_source_note'] = '估算(最新价/每股净资产)'
