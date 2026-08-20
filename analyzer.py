@@ -302,7 +302,15 @@ def _fmt(value, unit):
         if unit == 'x':
             return f"{value:.2f} 倍"
         if unit == 'currency':
+            # 智能单位：>=1 亿显示亿元，>=1 万显示万元，否则元
+            if abs(value) >= 1e8:
+                return f"{value / 1e8:.2f} 亿元"
+            if abs(value) >= 1e4:
+                return f"{value / 1e4:.2f} 万元"
             return f"{value:.2f} 元"
+        if unit == 'currency_yi':
+            # 强制亿元显示（value 单位=元）
+            return f"{value / 1e8:.2f} 亿元"
         if unit == 'wan':
             return f"{value:.2f} 万股"
         if unit == 'times':
