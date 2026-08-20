@@ -278,10 +278,86 @@ def _fetch_qq_quote(code):
         return None
 
 
+# ------------------------------------------------------------------ 资金流/北向/龙虎榜
+
+def _fetch_main_fund_flow(code):
+    """主力资金净流入（近 5 个交易日）。
+    接口: ak.stock_individual_fund_flow(stock=code)
+    返回: dict{main_net_inflow_5d, main_net_inflow_pct_5d} 或 None
+    """
+    import akshare as ak
+    try:
+        df = ak.stock_individual_fund_flow(stock=code)
+        if df is None or df.empty:
+            return None
+        recent = df.head(5)
+        result = {}
+        for col in df.columns:
+            col_str = str(col)
+            if '主力净流入' in col_str and '净额' in col_str:
+                result['main_net_inflow_5d'] = _safe_float(recent[col].sum())
+            elif '主力净流入' in col_str and '占比' in col_str:
+                result['main_net_inflow_pct_5d'] = _safe_float(recent[col].mean())
+        return result if result else None
+    except Exception:
+        return None
+
+
+def _fetch_north_bound(code):
+    """北向资金持股变化（最近一期）。
+    接口: ak.stock_hsgt_hold_stock_em(market='北向')
+    """
+    import akshare as ak
+    try:
+        df = ak.stock_hsgt_hold_stock_em(market='北向')
+        if df is None or df.empty:
+            return None
+        code_col = _find_col(df, '代码', '股票代码', 'symbol')
+        if code_col is None:
+            return None
+        sub = df[df[code_col].astype(str).str.contains(code, na=False)]
+        if sub.empty:
+            return None
+        change_col = _find_col(df, '持股变化', '持股变动', '增减')
+        if change_col is None:
+            return None
+        return {
+            'north_holding_change': _safe_float(sub[change_col].iloc[0]),
+        }
+    except Exception:
+        return None
+
+
+def _fetch_lhb(code):
+    """近一月龙虎榜上榜次数 + 总买入额。
+    接口: ak.stock_lhb_ggtj_em(symbol=code, period='近一月')
+    """
+    import akshare as ak
+    try:
+        df = ak.stock_lhb_ggtj_em(symbol=code, period='近一月')
+        if df is None or df.empty:
+            return None
+        count = len(df)
+        buy_col = _find_col(df, '买入金额', '总买入额')
+        total_buy = _safe_float(df[buy_col].sum()) if buy_col else None
+        return {
+            'lhb_count_30d': int(count),
+            'lhb_total_buy_30d': total_buy,
+        }
+    except Exception:
+        return None
+
+
 # ------------------------------------------------------------------ 主函数
 
 @cache_result(expire_seconds=3600)
 def fetch_all_data(query):
+    """两阶段数据获取：
+       阶段 1：并行抓取所有独立数据源（多线程提速）
+       阶段 2：基于阶段1的数据组装 d（依赖关系保持串行）
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     codes = normalize_code(query)
     if not codes:
         return None
@@ -289,6 +365,34 @@ def fetch_all_data(query):
     code = codes['code']
     name = codes['name']
 
+    # 阶段 1：并行抓取所有独立数据源
+    tasks = [
+        ('spot', _fetch_spot, code),
+        ('qq', _fetch_qq_quote, code),
+        ('financial', _fetch_financial, code),
+        ('ths', _fetch_financial_ths, code),
+        ('sina', _fetch_spot_sina, code),
+        ('fund', _fetch_main_fund_flow, code),
+        ('north', _fetch_north_bound, code),
+        ('lhb', _fetch_lhb, code),
+    ]
+    raw = {}
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        future_map = {executor.submit(fn, code): key for key, fn, code in tasks}
+        for future in as_completed(future_map, timeout=60):
+            key = future_map[future]
+            try:
+                raw[key] = future.result()
+            except Exception:
+                raw[key] = None
+
+    # 阶段 2：基于阶段1的数据组装 d 字典
+    d = _assemble_data(code, name, raw)
+    return d
+
+
+def _assemble_data(code, name, raw):
+    """根据并行抓取的原始数据组装最终数据字典。"""
     d = {
         'stock_code': code,
         'stock_name': name,
@@ -297,8 +401,8 @@ def fetch_all_data(query):
         'industry': None,
     }
 
-    # ==================== 1. 实时行情（spot_em，用户网络可能失败）====================
-    spot_row = _fetch_spot(code)
+    # ==================== 1. 实时行情（spot_em）====================
+    spot_row = raw.get('spot')
     if spot_row is not None:
         d['industry_name'] = str(spot_row.get('所属行业', '')) if '所属行业' in spot_row else None
         d['latest_price'] = _safe_float(spot_row.get('最新价'))
@@ -307,9 +411,8 @@ def fetch_all_data(query):
         d['pb_spot'] = _safe_float(spot_row.get('市净率'))
         d['total_mv'] = _safe_float(spot_row.get('总市值'))
 
-    # ==================== 1b. 腾讯 qt.gtimg 估值接口（最稳的主来源）====================
-    # 腾讯免费接口不依赖 akshare，也不依赖东财服务器，全球 CDN 加速
-    qq_data = _fetch_qq_quote(code)
+    # ==================== 1b. 腾讯 qt.gtimg 估值接口（最稳）====================
+    qq_data = raw.get('qq')
     if qq_data is not None:
         if qq_data.get('price') is not None:
             d['latest_price'] = qq_data['price']
@@ -324,8 +427,20 @@ def fetch_all_data(query):
             d['pb_ttm'] = qq_data['pb']
             d['pb_source_note'] = '腾讯 qt.gtimg'
 
+    # ==================== 1c. 资金流 / 北向 / 龙虎榜 ====================
+    fund_data = raw.get('fund')
+    if fund_data:
+        d.update(fund_data)
+    north_data = raw.get('north')
+    if north_data:
+        d.update(north_data)
+    lhb_data = raw.get('lhb')
+    if lhb_data:
+        d.update(lhb_data)
+
     # ==================== 2. 季报财务指标（主）====================
-    latest, prev, fin_df = _fetch_financial(code)
+    fin_result = raw.get('financial')
+    latest, prev, fin_df = (fin_result if fin_result else (None, None, None))
 
     if latest is not None and fin_df is not None:
         date_col = _find_col(fin_df, '日期', '报告期', '报告日期')
@@ -345,22 +460,20 @@ def fetch_all_data(query):
         d['revenue_growth'] = _get_value(latest, fin_df, '主营业务收入增长率', '营业收入增长率', '营收增长率')
         d['profit_growth'] = _get_value(latest, fin_df, '净利润增长率', '利润增长率')
 
-    # ==================== 2b. 同花顺财务摘要（备选：填补毛利率等）====================
+    # ==================== 2b. 同花顺财务摘要（备选）====================
     if d.get('gross_margin') is None:
-        ths_df = _fetch_financial_ths(code)
+        ths_df = raw.get('ths')
         if ths_df is not None:
             if d.get('gross_margin') is None:
                 d['gross_margin'] = _get_ths_value(ths_df, '销售毛利率')
             if d.get('gross_margin_prev') is None and d.get('gross_margin') is not None:
-                # 尝试取第二行（去年同期）
                 for col in ths_df.columns:
                     if '销售毛利率' in str(col):
                         if len(ths_df) > 1:
                             d['gross_margin_prev'] = _safe_float(ths_df[col].iloc[1])
                         break
 
-    # ==================== 2c. 业绩报表（备选：填补毛利率、行业、增速、EPS等）====================
-    # 主接口可能缺失毛利率，用业绩报表兜底
+    # ==================== 2c. 业绩报表（备选）====================
     yjbb_eps = None
     if d.get('gross_margin') is None or d.get('industry_name') is None or d.get('pe_ttm') is None:
         report_date = d.get('report_date')
@@ -383,13 +496,11 @@ def fetch_all_data(query):
                         d['roe'] = _safe_float(r.get('净资产收益率'))
                     if d.get('ocf_per_share') is None:
                         d['ocf_per_share'] = _safe_float(r.get('每股经营现金流量'))
-                    # 保存 yjbb 的 EPS（更准确的单季度数据）
                     yjbb_eps = _safe_float(r.get('每股收益'))
 
-    # ==================== 2d. 新浪财经实时行情（备选：最新价/PE/PB）====================
-    sina_row = _fetch_spot_sina(code)
+    # ==================== 2d. 新浪财经实时行情（备选）====================
+    sina_row = raw.get('sina')
     if sina_row is not None:
-        # 始终保存最新价（spot_em 失败时的兜底）
         if d.get('latest_price') is None:
             d['latest_price'] = _safe_float(sina_row.get('最新价'))
         if d.get('pe_ttm') is None:
@@ -397,15 +508,10 @@ def fetch_all_data(query):
         if d.get('pb_ttm') is None:
             d['pb_ttm'] = _safe_float(sina_row.get('市净率'))
 
-    # ==================== 3. 自行估算 PE/PB（所有外部估值接口失败时的兜底）====================
-    # PE = 最新价 / 每股收益(TTM近似)
-    # PB = 最新价 / 每股净资产
+    # ==================== 3. 自行估算 PE/PB（兜底）====================
     price_for_calc = d.get('latest_price')
     if price_for_calc is not None and price_for_calc > 0:
-        # 优先用业绩报表的 EPS（更准确），其次用主接口财务数据
-        # 字段名兜底：兼容 akshare 多个版本的列名（基本/摊薄/加权/稀释/EPS）
         if yjbb_eps is not None:
-            # yjbb 的 EPS 是单季度，粗略估算全年 = Q1 × 4
             eps = yjbb_eps * 4
             pe_note = '估算(最新价/业绩报表EPS×4)'
         elif latest is not None and fin_df is not None:
@@ -427,7 +533,6 @@ def fetch_all_data(query):
                 '归属母公司股东权益每股', '每股股东权益',
             )
 
-        # 保存 EPS 给 analyzer 用（用于 PE 评分的亏损判断）
         if eps is not None:
             d['eps_value'] = eps
 
@@ -436,7 +541,6 @@ def fetch_all_data(query):
                 d['pe_ttm'] = price_for_calc / eps
                 d['pe_source_note'] = pe_note
             else:
-                # 公司亏损或微利，PE 失去基本面意义，不计算
                 d['eps_loss_flag'] = True
 
         if d.get('pb_ttm') is None and navps is not None and navps > 0:

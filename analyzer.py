@@ -222,6 +222,51 @@ def calc_pb_value(value, **ctx):
     return 5, "PB 超过 6 倍，资产泡沫化风险极高。"
 
 
+# ================================================================ 资金面（机构动向）
+
+def calc_main_fund_flow(value, **ctx):
+    """主力资金近 5 日净流入额（元）。正值=流入，负值=流出。"""
+    if value is None:
+        return MISSING
+    if value > 5e7:
+        return 0, "近5日主力资金大幅净流入超 5000 万，机构看好。"
+    if value > 1e7:
+        return 1, "近5日主力资金净流入 1000-5000 万，机构偏多。"
+    if value > -1e7:
+        return 2, "近5日主力资金基本平衡，多空博弈中。"
+    if value > -5e7:
+        return 3, "近5日主力资金净流出 1000-5000 万，机构偏空。"
+    return 5, "近5日主力资金大幅净流出超 5000 万，机构撤退信号。"
+
+
+def calc_north_bound_change(value, **ctx):
+    """北向资金近 5 日持股变化（万股）。正值=加仓，负值=减仓。"""
+    if value is None:
+        return MISSING
+    if value > 100:
+        return 0, "北向资金大幅加仓超 100 万股，外资看好。"
+    if value > 10:
+        return 1, "北向资金小幅加仓 10-100 万股，外资偏多。"
+    if value > -10:
+        return 2, "北向资金持仓基本不变。"
+    if value > -100:
+        return 3, "北向资金小幅减仓 10-100 万股，外资偏空。"
+    return 5, "北向资金大幅减仓超 100 万股，外资撤退信号。"
+
+
+def calc_lhb_activity(value, **ctx):
+    """近一月龙虎榜上榜次数。"""
+    if value is None:
+        return MISSING
+    if value == 0:
+        return 1, "近一月无龙虎榜记录，走势平稳。"
+    if value <= 2:
+        return 2, f"近一月龙虎榜上榜 {value} 次，可能有重大事件。"
+    if value <= 5:
+        return 3, f"近一月龙虎榜上榜 {value} 次，短线波动较大。"
+    return 5, f"近一月龙虎榜上榜 {value} 次，异常活跃，警惕主力博弈风险。"
+
+
 # ================================================================ 综合评级
 
 def calc_star_rating(mines_list):
@@ -258,6 +303,10 @@ def _fmt(value, unit):
             return f"{value:.2f} 倍"
         if unit == 'currency':
             return f"{value:.2f} 元"
+        if unit == 'wan':
+            return f"{value:.2f} 万股"
+        if unit == 'times':
+            return f"{value:.0f} 次"
         if unit == 'text':
             return str(value)
         return str(value)
@@ -351,6 +400,14 @@ def run_analysis(d):
                 item("当前 PE-TTM", pe_ttm, 'x', calc_pe_value, '财报', eps_ttm=eps_ttm),
                 item("PEG", peg, 'num', calc_peg, '财报', profit_growth=profit_growth),
                 item("当前 PB", pb_ttm, 'x', calc_pb_value, '财报'),
+            ],
+        },
+        {
+            "name": "资金面（机构动向）",
+            "indicators": [
+                item("主力资金近5日净流入", d.get('main_net_inflow_5d'), 'currency', calc_main_fund_flow, 'akshare资金流'),
+                item("北向资金近5日持股变化", d.get('north_holding_change'), 'wan', calc_north_bound_change, 'akshare沪深港通'),
+                item("近1月龙虎榜上榜次数", d.get('lhb_count_30d'), 'times', calc_lhb_activity, 'akshare龙虎榜'),
             ],
         },
     ]
