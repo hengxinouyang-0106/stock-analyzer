@@ -282,34 +282,76 @@ def _fetch_qq_quote(code):
 
 def _fetch_main_fund_flow(code):
     """主力资金净流入（近 5 个交易日）。
-    接口: ak.stock_individual_fund_flow(stock=code)
+    接口: ak.stock_individual_fund_flow(stock=code, market='sh'/'sz')
     返回: dict{main_net_inflow_5d, main_net_inflow_pct_5d} 或 None
+    列名（akshare 1.18.x）: '主力净流入-净额' / '主力净流入-净占比'
     """
     import akshare as ak
     try:
-        df = ak.stock_individual_fund_flow(stock=code)
+        market = 'sh' if code.startswith('6') else 'sz'
+        df = ak.stock_individual_fund_flow(stock=code, market=market)
         if df is None or df.empty:
             return None
         recent = df.head(5)
+        net_col = _find_col(df, '主力净流入-净额')
+        pct_col = _find_col(df, '主力净流入-净占比')
         result = {}
-        for col in df.columns:
-            col_str = str(col)
-            if '主力净流入' in col_str and '净额' in col_str:
-                result['main_net_inflow_5d'] = _safe_float(recent[col].sum())
-            elif '主力净流入' in col_str and '占比' in col_str:
-                result['main_net_inflow_pct_5d'] = _safe_float(recent[col].mean())
+        if net_col is not None:
+            result['main_net_inflow_5d'] = _safe_float(recent[net_col].sum())
+        if pct_col is not None:
+            result['main_net_inflow_pct_5d'] = _safe_float(recent[pct_col].mean())
         return result if result else None
     except Exception:
         return None
 
 
 def _fetch_north_bound(code):
-    """北向资金持股变化（最近一期）。
-    接口: ak.stock_hsgt_hold_stock_em(market='北向')
+    """北向资金持股变化（5日累计）。
+    接口: ak.stock_hsgt_hold_stock_em(market='北向', indicator='5日排行')
+    返回: dict{north_holding_change} (单位: 万股) 或 None
+    注: 该接口在 akshare 1.18.x 偶发 TypeError，已加重试与超时容错。
+    """
+    import akshare as ak
+    import time
+    last_err = None
+    for attempt in range(2):
+        try:
+            df = ak.stock_hsgt_hold_stock_em(market='北向', indicator='5日排行')
+            if df is None or df.empty:
+                last_err = 'empty df'
+                time.sleep(0.5)
+                continue
+            code_col = _find_col(df, '代码', '股票代码', 'symbol')
+            if code_col is None:
+                last_err = 'no code col'
+                break
+            sub = df[df[code_col].astype(str).str.contains(code, na=False)]
+            if sub.empty:
+                return None
+            change_col = _find_col(df, '持股变化', '持股变动', '增减')
+            if change_col is None:
+                last_err = 'no change col'
+                break
+            return {
+                'north_holding_change': _safe_float(sub[change_col].iloc[0]),
+            }
+        except Exception as e:
+            last_err = f'{type(e).__name__}: {str(e)[:80]}'
+            time.sleep(0.5)
+    # 静默失败，不影响其它数据源
+    return None
+
+
+def _fetch_lhb(code):
+    """近一月龙虎榜上榜次数 + 总买入额。
+    接口: ak.stock_lhb_stock_statistic_em(symbol='近一月')
+    返回: 全市场近一月龙虎榜个股统计 → 按代码筛选。
+    字段: 上榜次数 / 龙虎榜净买额 / 龙虎榜买入额。
+    注: stock_lhb_ggtj_em 在 akshare 1.18.x 已移除，改用此接口。
     """
     import akshare as ak
     try:
-        df = ak.stock_hsgt_hold_stock_em(market='北向')
+        df = ak.stock_lhb_stock_statistic_em(symbol='近一月')
         if df is None or df.empty:
             return None
         code_col = _find_col(df, '代码', '股票代码', 'symbol')
@@ -317,32 +359,14 @@ def _fetch_north_bound(code):
             return None
         sub = df[df[code_col].astype(str).str.contains(code, na=False)]
         if sub.empty:
-            return None
-        change_col = _find_col(df, '持股变化', '持股变动', '增减')
-        if change_col is None:
-            return None
+            return {'lhb_count_30d': 0, 'lhb_total_buy_30d': 0.0}
+        count = int(sub['上榜次数'].iloc[0]) if '上榜次数' in sub.columns else 0
+        total_buy = _safe_float(sub['龙虎榜买入额'].iloc[0]) if '龙虎榜买入额' in sub.columns else None
+        net_buy = _safe_float(sub['龙虎榜净买额'].iloc[0]) if '龙虎榜净买额' in sub.columns else None
         return {
-            'north_holding_change': _safe_float(sub[change_col].iloc[0]),
-        }
-    except Exception:
-        return None
-
-
-def _fetch_lhb(code):
-    """近一月龙虎榜上榜次数 + 总买入额。
-    接口: ak.stock_lhb_ggtj_em(symbol=code, period='近一月')
-    """
-    import akshare as ak
-    try:
-        df = ak.stock_lhb_ggtj_em(symbol=code, period='近一月')
-        if df is None or df.empty:
-            return None
-        count = len(df)
-        buy_col = _find_col(df, '买入金额', '总买入额')
-        total_buy = _safe_float(df[buy_col].sum()) if buy_col else None
-        return {
-            'lhb_count_30d': int(count),
+            'lhb_count_30d': count,
             'lhb_total_buy_30d': total_buy,
+            'lhb_net_buy_30d': net_buy,
         }
     except Exception:
         return None
